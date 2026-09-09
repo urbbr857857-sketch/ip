@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OK影视 AES 密文解密工具</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f4f6f8;color:#222}
+.wrap{max-width:1100px;margin:0 auto;padding:22px}.card{background:#fff;border-radius:16px;padding:20px;margin-bottom:16px;box-shadow:0 4px 18px #0000000d}
+h1{margin:0 0 8px;font-size:24px}h2{font-size:18px;margin:0 0 14px}.muted{color:#667085;font-size:13px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}button,.filebtn{border:0;border-radius:10px;padding:11px 16px;background:#1677ff;color:#fff;cursor:pointer;font-size:14px}
+button.secondary{background:#667085}button.success{background:#16a34a}button.danger{background:#dc2626}button:disabled{opacity:.5;cursor:not-allowed}
+.filebtn{display:inline-block}.filebtn input{display:none}
+input[type=text]{flex:1;min-width:240px;padding:11px 13px;border:1px solid #d0d5dd;border-radius:10px;font-size:14px}
+textarea{width:100%;min-height:430px;resize:vertical;border:1px solid #d0d5dd;border-radius:12px;padding:14px;font:13px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;background:#fbfcfe}
+.status{padding:10px 12px;border-radius:10px;background:#f2f4f7;font-size:13px;white-space:pre-wrap}.ok{background:#ecfdf3;color:#166534}.err{background:#fef2f2;color:#991b1b}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:760px){.grid{grid-template-columns:1fr}.wrap{padding:12px}}
+small{color:#667085}.badge{display:inline-block;padding:3px 8px;border-radius:99px;background:#eef4ff;color:#175cd3;font-size:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>OK影视 AES 密文解密工具</h1>
+    <div class="muted">纯前端、单 HTML、无需后端。支持 TXT 文件、本地密文粘贴、URL 获取、复制明文、导出 JSON/TXT。</div>
+  </div>
+
+  <div class="card">
+    <h2>① 获取密文</h2>
+    <div class="row" style="margin-bottom:12px">
+      <label class="filebtn">上传 TXT<input id="file" type="file" accept=".txt,.json,text/plain"></label>
+      <button class="secondary" id="clearBtn">清空</button>
+    </div>
+    <div class="row">
+      <input id="url" type="text" placeholder="https://example.com/config.txt">
+      <button id="urlBtn">从 URL 获取</button>
+    </div>
+    <p class="muted">本工具由超哥制作</p>
+  </div>
+
+  <div class="card">
+    <h2>② 密文</h2>
+    <textarea id="cipher" placeholder="把 $#+密码#$...密文...偏移量 粘贴到这里，或上传 TXT / 从 URL 获取"></textarea>
+    <div class="row" style="margin-top:12px">
+      <button id="decryptBtn">开始解密</button>
+      <span id="meta" class="badge">等待密文</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>③ 明文</h2>
+    <textarea id="plain" placeholder="解密后的 JSON 会显示在这里" readonly></textarea>
+    <div class="row" style="margin-top:12px">
+      <button class="success" id="copyBtn">一键复制</button>
+      <button id="saveJsonBtn">导出 JSON</button>
+      <button class="secondary" id="saveTxtBtn">导出 TXT</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>运行状态</h2>
+    <div id="status" class="status">就绪。</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ========== 解密核心逻辑（保持不变） ==========
+const $ = id => document.getElementById(id);
+const cipherBox = $("cipher"), plainBox = $("plain"), statusBox = $("status"), meta = $("meta");
+
+function status(msg, ok=false, err=false){
+  statusBox.textContent = msg;
+  statusBox.className = "status" + (ok ? " ok" : "") + (err ? " err" : "");
+}
+
+function cleanText(s){
+  return String(s || "").replace(/^\uFEFF/, "").trim();
+}
+
+function hexToBytes(hex){
+  hex = hex.replace(/\s+/g,"");
+  if(!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2) throw new Error("密文不是有效 HEX 数据");
+  const a = new Uint8Array(hex.length/2);
+  for(let i=0;i<a.length;i++) a[i]=parseInt(hex.slice(i*2,i*2+2),16);
+  return a;
+}
+
+function bytesToUtf8(bytes){
+  return new TextDecoder("utf-8",{fatal:false}).decode(bytes);
+}
+
+function pad16(s){
+  return (s + "0000000000000000").slice(0,16);
+}
+
+function parseCipher(input){
+  let s = cleanText(input);
+  const compact = s.replace(/\s+/g, "");
+  let raw = null;
+  if(compact.length >= 4 && compact.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(compact)){
+    try { raw = hexToBytes(compact); } catch(e) { raw = null; }
+  }
+
+  if(raw){
+    const headText = new TextDecoder("ascii").decode(raw.slice(0, Math.min(raw.length, 512)));
+    const begin = headText.indexOf("$#");
+    const end = headText.indexOf("#$", begin + 2);
+    if(begin < 0 || end < 0) throw new Error("HEX解码后未找到 $#密码#$ 头部");
+    const password = headText.slice(begin + 2, end);
+    const headerEnd = end + 2;
+    const candidates=[];
+    for(let tailLen=1; tailLen<=128 && tailLen < raw.length-headerEnd; tailLen++){
+      const tail=raw.slice(raw.length-tailLen);
+      let printable=true;
+      for(const x of tail){ if(x<0x20 || x>0x7e){ printable=false; break; } }
+      if(!printable) continue;
+      const ctLen=raw.length-tailLen-headerEnd;
+      if(ctLen>=16 && ctLen%16===0){
+        candidates.push({tailLen, ivText:new TextDecoder("ascii").decode(tail), ciphertext:raw.slice(headerEnd,raw.length-tailLen)});
+      }
+    }
+    if(!candidates.length) throw new Error("无法自动提取 AES 密文和尾部偏移量");
+    const chosen=candidates.find(x=>x.tailLen===13)||candidates[0];
+    return {password,ivText:chosen.ivText,ciphertext:chosen.ciphertext,tailLen:chosen.tailLen,sourceFormat:"HEX → 原始字节"};
+  }
+
+  const begin=s.indexOf("$#");
+  if(begin<0) throw new Error("未找到 $#密码#$，同时也不是纯 HEX 文件");
+  const end=s.indexOf("#$",begin+2);
+  if(end<0) throw new Error("找到 $# 但没有找到 #$");
+  const password=s.slice(begin+2,end);
+  const body=s.slice(end+2).replace(/\s+/g,"");
+  const candidates=[];
+  for(let tailLen=1;tailLen<=128 && tailLen<body.length;tailLen++){
+    const ctHex=body.slice(0,body.length-tailLen), tail=body.slice(body.length-tailLen);
+    if(ctHex.length%2 || !/^[0-9a-fA-F]+$/.test(ctHex) || !/^[\x20-\x7E]+$/.test(tail)) continue;
+    const ct=hexToBytes(ctHex);
+    if(ct.length>=16 && ct.length%16===0) candidates.push({tailLen,ivText:tail,ciphertext:ct});
+  }
+  if(!candidates.length) throw new Error("无法自动提取 AES 密文和尾部偏移量");
+  const chosen=candidates.find(x=>x.tailLen===13)||candidates[0];
+  return {password,ivText:chosen.ivText,ciphertext:chosen.ciphertext,tailLen:chosen.tailLen,sourceFormat:"文本"};
+}
+
+async function decryptText(input){
+  const p = parseCipher(input);
+  const keyText = pad16(p.password);
+  const ivText = pad16(p.ivText);
+  const enc = new TextEncoder();
+  const keyBytes = enc.encode(keyText);
+  const ivBytes = enc.encode(ivText);
+  if(keyBytes.length!==16 || ivBytes.length!==16) throw new Error("Key/IV 长度不是 16 字节");
+  const key = await crypto.subtle.importKey("raw", keyBytes, {name:"AES-CBC"}, false, ["decrypt"]);
+  const decrypted = await crypto.subtle.decrypt({name:"AES-CBC",iv:ivBytes}, key, p.ciphertext);
+  let text = bytesToUtf8(new Uint8Array(decrypted)).replace(/^\uFEFF/,"").trim();
+  let obj;
+  try { obj = JSON.parse(text); } catch(e) { throw new Error("AES 解密完成，但结果不是有效 JSON。请检查密文格式/密码/偏移量。"); }
+  return {obj,text:JSON.stringify(obj,null,2),info:p};
+}
+
+$("file").addEventListener("change", async e=>{
+  const f=e.target.files[0];
+  if(!f) return;
+  try{
+    let text=await f.text();
+    if(!text.includes("$#")){
+      const buf=await f.arrayBuffer();
+      try{text=new TextDecoder("gb18030").decode(buf);}catch(e){}
+    }
+    cipherBox.value=text;
+    meta.textContent=`已载入：${f.name}`;
+    status(`已读取 ${f.name}，共 ${text.length.toLocaleString()} 个字符。`,true);
+  }catch(err){status("读取文件失败："+err.message,false,true);}
+});
+
+$("clearBtn").onclick=()=>{
+  cipherBox.value=""; plainBox.value=""; $("url").value="";
+  meta.textContent="等待密文"; status("已清空。");
+};
+
+// ========== URL 获取：完全照抄 wms，只拿文本，不关心内容 ==========
+$("urlBtn").onclick = async () => {
+    const input = $("url").value.trim();
+    if (!input) {
+        status("❌ 请输入网址", false, true);
+        return;
+    }
+    let targetUrl;
+    try {
+        targetUrl = new URL(input).href;
+    } catch {
+        status("❌ 网址格式不正确", false, true);
+        return;
+    }
+
+    status("⏳ 正在尝试获取...");
+
+    const encoded = encodeURIComponent(targetUrl);
+
+    // 完全照抄 wms 的 attempts 列表（顺序、URL、headers 一字不差）
+    const attempts = [
+        {
+            name: "直接读取",
+            url: targetUrl,
+            headers: { "Accept": "text/plain,text/*,*/*" }
+        },
+        {
+            name: "Jina Reader",
+            url: "https://r.jina.ai/" + targetUrl,
+            headers: { "Accept": "text/plain,*/*" }
+        },
+        {
+            name: "AllOrigins",
+            url: "https://api.allorigins.win/raw?url=" + encoded,
+            headers: { "Accept": "text/plain,*/*" }
+        },
+        {
+            name: "corsproxy.io",
+            url: "https://corsproxy.io/?" + encoded,
+            headers: { "Accept": "text/plain,*/*" }
+        },
+        {
+            name: "CodeTabs",
+            url: "https://api.codetabs.com/v1/proxy?quest=" + encoded,
+            headers: { "Accept": "text/plain,*/*" }
+        }
+    ];
+
+    let lastError = null;
+
+    for (const attempt of attempts) {
+        let controller = null;
+        let timer = null;
+        try {
+            status(`⏳ 正在尝试 ${attempt.name}...`);
+            controller = new AbortController();
+            timer = setTimeout(() => controller.abort(), 15000);
+
+            const response = await fetch(attempt.url, {
+                method: "GET",
+                headers: attempt.headers,
+                signal: controller.signal,
+                redirect: "follow",
+                cache: "no-store"
+            });
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            let text = await response.text();
+            text = text.replace(/^\uFEFF/, "").trim();
+
+            if (!text) throw new Error("内容为空");
+
+            // 只检查是否为 HTML 页面（wms 的做法）
+            if (/^<(!doctype\s+)?html/i.test(text)) throw new Error("返回HTML页面");
+
+            // 不管内容是什么，只要不是 HTML 就填入密文框（后续解密会自行判断）
+            cipherBox.value = text;
+            meta.textContent = `✅ ${attempt.name} 获取成功`;
+            status(`✅ 获取成功（${attempt.name}），共 ${text.length.toLocaleString()} 字符`, true);
+            return;
+
+        } catch (err) {
+            lastError = err;
+            console.warn(`${attempt.name} 失败:`, err);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
+    status(`❌ 所有方式均失败。最后错误：${lastError?.message || "未知"}\n可手动粘贴内容`, false, true);
+};
+
+// ========== 其余按钮 ==========
+$("decryptBtn").onclick=async()=>{
+  const input=cipherBox.value.trim();
+  if(!input){status("没有密文可解密。",false,true);return;}
+  try{
+    status("正在解析并 AES-128-CBC 解密……");
+    const r=await decryptText(input);
+    plainBox.value=r.text;
+    meta.textContent=`密码 ${r.info.password.length} 字符 / 尾部 ${r.info.tailLen} 字符`;
+    status(`解密成功！\n格式：${r.info.sourceFormat||"未知"}\nAES-128-CBC\nKey：${pad16(r.info.password)}\nIV：${pad16(r.info.ivText)}\n明文 JSON 已生成。`,true);
+  }catch(err){
+    console.error(err);
+    plainBox.value="";
+    status("解密失败："+err.message,false,true);
+  }
+};
+
+$("copyBtn").onclick=async()=>{
+  if(!plainBox.value){status("没有明文可复制。",false,true);return;}
+  try{
+    await navigator.clipboard.writeText(plainBox.value);
+    status("明文已复制到剪贴板。",true);
+  }catch(e){
+    plainBox.select(); document.execCommand("copy");
+    status("明文已复制。",true);
+  }
+};
+
+function downloadText(name,text,type){
+  const blob=new Blob([text],{type});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+$("saveJsonBtn").onclick=()=>{
+  if(!plainBox.value){status("没有明文可导出。",false,true);return;}
+  downloadText("解密明文.json",plainBox.value,"application/json;charset=utf-8");
+  status("已导出 JSON 文件。",true);
+};
+$("saveTxtBtn").onclick=()=>{
+  if(!plainBox.value){status("没有明文可导出。",false,true);return;}
+  downloadText("解密明文.txt",plainBox.value,"text/plain;charset=utf-8");
+  status("已导出 TXT 文件。",true);
+};
+</script>
+</body>
+</html>
